@@ -3,9 +3,13 @@ from flask_cors import CORS
 import json
 import os
 import uuid
+import base64
+import threading
+import time
 from datetime import datetime
 import sqlite3
 from werkzeug.utils import secure_filename
+from github import Github  # pip install PyGithub
 
 app = Flask(__name__)
 CORS(app)
@@ -14,6 +18,11 @@ CORS(app)
 DATABASE = 'community.db'
 UPLOAD_FOLDER = 'community_apps'
 ALLOWED_EXTENSIONS = {'html', 'js', 'css', 'json', 'png', 'jpg', 'jpeg'}
+
+# CONFIGURE AQUI SEU TOKEN DO GITHUB
+GITHUB_TOKEN = os.environ.get("TOKEN") # obtenha em: https://github.com/settings/tokens
+BACKUP_ENABLED = False
+BACKUP_GIST_ID = None
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -50,7 +59,213 @@ def init_db():
     conn.commit()
     conn.close()
 
+# ============ SISTEMA DE BACKUP GITHUB ============
+
+def setup_backup():
+    """Configura o sistema de backup"""
+    global BACKUP_ENABLED, BACKUP_GIST_ID
+    
+    if not GITHUB_TOKEN or GITHUB_TOKEN == "SEU_TOKEN_GITHUB_AQUI":
+        print("⚠️ Token do GitHub não configurado. Backup desativado.")
+        return
+    
+    try:
+        # Testar token
+        g = Github(GITHUB_TOKEN)
+        user = g.get_user()
+        print(f"✅ Conectado ao GitHub como: {user.login}")
+        BACKUP_ENABLED = True
+        
+        # Tentar encontrar Gist existente
+        for gist in user.get_gists():
+            if gist.description and "NetOS Community Backup" in gist.description:
+                BACKUP_GIST_ID = gist.id
+                print(f"📁 Gist de backup encontrado: {BACKUP_GIST_ID}")
+                break
+        
+        # Se o banco existe, fazer backup inicial
+        if os.path.exists(DATABASE) and not is_database_empty():
+            print("🔄 Fazendo backup inicial...")
+            backup_to_github()
+        
+        # Iniciar backup automático (a cada hora)
+        threading.Thread(target=auto_backup_worker, daemon=True).start()
+        
+    except Exception as e:
+        print(f"❌ Erro ao configurar backup: {e}")
+        BACKUP_ENABLED = False
+
+def is_database_empty():
+    """Verifica se o banco está vazio"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM users")
+        user_count = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM apps")
+        app_count = c.fetchone()[0]
+        
+        conn.close()
+        return user_count == 0 and app_count == 0
+    except:
+        return True
+
+def backup_to_github():
+    """Faz backup do banco para GitHub Gist"""
+    if not BACKUP_ENABLED:
+        return False
+    
+    try:
+        # Verificar se há dados para backup
+        if not os.path.exists(DATABASE) or is_database_empty():
+            print("⚠️ Nenhum dado para backup")
+            return False
+        
+        # Ler banco de dados
+        with open(DATABASE, 'rb') as f:
+            db_content = f.read()
+        
+        # Converter para base64
+        db_base64 = base64.b64encode(db_content).decode('utf-8')
+        
+        # Preparar dados do backup
+        backup_data = {
+            "database": db_base64,
+            "timestamp": datetime.now().isoformat(),
+            "size": len(db_content),
+            "tables": get_table_counts()
+        }
+        
+        # Criar/atualizar Gist
+        g = Github(GITHUB_TOKEN)
+        user = g.get_user()
+        
+        global BACKUP_GIST_ID
+        
+        files = {"community_backup.json": {"content": json.dumps(backup_data, indent=2)}}
+        
+        if BACKUP_GIST_ID:
+            try:
+                gist = g.get_gist(BACKUP_GIST_ID)
+                gist.edit(
+                    description=f"NetOS Community Backup - {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                    files=files
+                )
+                print(f"📤 Backup atualizado")
+            except:
+                # Se não encontrar, cria novo
+                create_new_gist(g, user, files)
+        else:
+            create_new_gist(g, user, files)
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro no backup: {e}")
+        return False
+
+def create_new_gist(g, user, files):
+    """Cria um novo Gist de backup"""
+    global BACKUP_GIST_ID
+    new_gist = user.create_gist(
+        public=False,
+        files=files,
+        description=f"NetOS Community Backup - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+    )
+    BACKUP_GIST_ID = new_gist.id
+    print(f"📤 Novo backup criado: {BACKUP_GIST_ID}")
+
+def restore_from_github():
+    """Restaura banco do backup do GitHub"""
+    if not BACKUP_ENABLED:
+        return False
+    
+    try:
+        g = Github(GITHUB_TOKEN)
+        
+        # Procurar Gist de backup
+        if not BACKUP_GIST_ID:
+            user = g.get_user()
+            for gist in user.get_gists():
+                if gist.description and "NetOS Community Backup" in gist.description:
+                    BACKUP_GIST_ID = gist.id
+                    break
+        
+        if not BACKUP_GIST_ID:
+            print("⚠️ Nenhum backup encontrado")
+            return False
+        
+        # Baixar backup
+        gist = g.get_gist(BACKUP_GIST_ID)
+        
+        for filename, file_info in gist.files.items():
+            if "backup" in filename.lower():
+                backup_data = json.loads(file_info.content)
+                db_bytes = base64.b64decode(backup_data["database"])
+                
+                # Salvar banco
+                with open(DATABASE, 'wb') as f:
+                    f.write(db_bytes)
+                
+                print(f"✅ Banco restaurado (backup de {backup_data['timestamp']})")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"❌ Erro na restauração: {e}")
+        return False
+
+def get_table_counts():
+    """Retorna contagem de registros por tabela"""
+    counts = {}
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = c.fetchall()
+        
+        for table in tables:
+            table_name = table[0]
+            try:
+                c.execute(f"SELECT COUNT(*) FROM {table_name}")
+                count = c.fetchone()[0]
+                counts[table_name] = count
+            except:
+                counts[table_name] = 0
+        
+        conn.close()
+    except:
+        pass
+    
+    return counts
+
+def auto_backup_worker():
+    """Faz backup automático periodicamente"""
+    while BACKUP_ENABLED:
+        time.sleep(3600)  # 1 hora
+        print("⏰ Backup automático...")
+        backup_to_github()
+
+def trigger_backup():
+    """Dispara backup em segundo plano"""
+    if BACKUP_ENABLED:
+        threading.Thread(target=backup_to_github).start()
+
+# ============ INICIALIZAÇÃO DO BACKUP ============
+
 init_db()
+setup_backup()
+
+# Tentar restaurar se o banco estiver vazio
+if os.path.exists(DATABASE) and is_database_empty():
+    print("🔄 Banco vazio, tentando restaurar do backup...")
+    restore_from_github()
+
+# ============ ROTAS EXISTENTES (inalteradas) ============
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -60,8 +275,26 @@ def health():
     return jsonify({
         'status': 'online',
         'service': 'NetOS Community Apps',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'backup': BACKUP_ENABLED,
+        'gist_id': BACKUP_GIST_ID
     })
+
+@app.route('/api/backup', methods=['POST'])
+def manual_backup():
+    """Rota para fazer backup manual"""
+    if backup_to_github():
+        return jsonify({'message': 'Backup realizado com sucesso'}), 200
+    else:
+        return jsonify({'error': 'Falha no backup'}), 500
+
+@app.route('/api/restore', methods=['POST'])
+def manual_restore():
+    """Rota para restaurar manualmente"""
+    if restore_from_github():
+        return jsonify({'message': 'Banco restaurado com sucesso'}), 200
+    else:
+        return jsonify({'error': 'Falha na restauração'}), 500
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -89,6 +322,9 @@ def register():
     
     conn.commit()
     conn.close()
+    
+    # Disparar backup após registro
+    trigger_backup()
     
     return jsonify({
         'message': 'User registered successfully',
@@ -199,6 +435,9 @@ def upload_app():
     
     conn.commit()
     conn.close()
+    
+    # Disparar backup após upload
+    trigger_backup()
     
     return jsonify({
         'message': 'App uploaded successfully',
