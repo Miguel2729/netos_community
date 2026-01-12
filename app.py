@@ -309,7 +309,7 @@ def get_table_counts():
 def auto_backup_worker():
     """Faz backup automático periodicamente"""
     while BACKUP_ENABLED:
-        time.sleep(3600)  # 1 hora = 3600 segundos
+        time.sleep(12)  # 1 hora = 3600 segundos
         print("⏰ Executando backup automático...")
         backup_to_github()
 
