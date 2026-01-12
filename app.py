@@ -232,7 +232,7 @@ def backup_to_github():
         return True
         
     except Exception as e:
-        print(f"❌ Erro no backup para GitHub: {str(e)[:100]}")
+        print(f"❌ Erro no backup para GitHub: {e}")
         return False
 
 def create_new_gist(g, files):
