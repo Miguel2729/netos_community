@@ -9,7 +9,15 @@ import time
 from datetime import datetime
 import sqlite3
 from werkzeug.utils import secure_filename
-from github import Github  # pip install PyGithub
+
+# Tentar importar GitHub, mas não falhar se não estiver instalado
+try:
+    from github import Github
+    GITHUB_AVAILABLE = True
+except ImportError:
+    print("⚠️ PyGithub não instalado. Instale com: pip install PyGithub")
+    GITHUB_AVAILABLE = False
+    Github = None
 
 app = Flask(__name__)
 CORS(app)
@@ -20,13 +28,14 @@ UPLOAD_FOLDER = 'community_apps'
 ALLOWED_EXTENSIONS = {'html', 'js', 'css', 'json', 'png', 'jpg', 'jpeg'}
 
 # CONFIGURE AQUI SEU TOKEN DO GITHUB
-GITHUB_TOKEN = os.environ.get("TOKEN") # obtenha em: https://github.com/settings/tokens
+GITHUB_TOKEN = os.environ.get("TOKEN")  # Variável de ambiente no Render
 BACKUP_ENABLED = False
 BACKUP_GIST_ID = None
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def init_db():
+    """Inicializa o banco de dados"""
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     
@@ -58,41 +67,60 @@ def init_db():
     
     conn.commit()
     conn.close()
+    print("✅ Banco de dados inicializado")
 
 # ============ SISTEMA DE BACKUP GITHUB ============
 
-def setup_backup():
-    """Configura o sistema de backup"""
+def initialize_backup_system():
+    """Inicializa tudo em ordem correta"""
     global BACKUP_ENABLED, BACKUP_GIST_ID
     
-    if not GITHUB_TOKEN or GITHUB_TOKEN == "SEU_TOKEN_GITHUB_AQUI":
-        print("⚠️ Token do GitHub não configurado. Backup desativado.")
+    # 1. Inicializar banco de dados
+    init_db()
+    
+    # 2. Verificar se GitHub está disponível
+    if not GITHUB_AVAILABLE:
+        print("⚠️ PyGithub não disponível. Backup desativado.")
+        return
+    
+    # 3. Verificar se tem token
+    if not GITHUB_TOKEN:
+        print("⚠️ Token do GitHub não configurado (variável TOKEN). Backup desativado.")
         return
     
     try:
-        # Testar token
+        # 4. Testar conexão com GitHub
         g = Github(GITHUB_TOKEN)
         user = g.get_user()
         print(f"✅ Conectado ao GitHub como: {user.login}")
         BACKUP_ENABLED = True
         
-        # Tentar encontrar Gist existente
+        # 5. Tentar encontrar Gist existente
         for gist in user.get_gists():
             if gist.description and "NetOS Community Backup" in gist.description:
                 BACKUP_GIST_ID = gist.id
                 print(f"📁 Gist de backup encontrado: {BACKUP_GIST_ID}")
                 break
         
-        # Se o banco existe, fazer backup inicial
-        if os.path.exists(DATABASE) and not is_database_empty():
-            print("🔄 Fazendo backup inicial...")
+        # 6. Se o banco está vazio, tentar restaurar
+        if is_database_empty():
+            print("🔄 Banco vazio, tentando restaurar do backup...")
+            if restore_from_github():
+                print("✅ Banco restaurado do backup!")
+            else:
+                print("⚠️ Nenhum backup encontrado ou falha na restauração")
+        else:
+            # 7. Se tem dados, fazer backup inicial
+            print("🔄 Fazendo backup inicial dos dados existentes...")
             backup_to_github()
         
-        # Iniciar backup automático (a cada hora)
-        threading.Thread(target=auto_backup_worker, daemon=True).start()
+        # 8. Iniciar backup automático
+        if BACKUP_ENABLED:
+            threading.Thread(target=auto_backup_worker, daemon=True).start()
+            print("✅ Sistema de backup inicializado com sucesso")
         
     except Exception as e:
-        print(f"❌ Erro ao configurar backup: {e}")
+        print(f"❌ Erro ao inicializar backup: {str(e)[:100]}")
         BACKUP_ENABLED = False
 
 def is_database_empty():
@@ -100,6 +128,13 @@ def is_database_empty():
     try:
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
+        
+        c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+        has_tables = c.fetchone()[0] > 0
+        
+        if not has_tables:
+            conn.close()
+            return True
         
         c.execute("SELECT COUNT(*) FROM users")
         user_count = c.fetchone()[0]
@@ -109,18 +144,24 @@ def is_database_empty():
         
         conn.close()
         return user_count == 0 and app_count == 0
-    except:
+        
+    except sqlite3.Error as e:
+        print(f"❌ Erro ao verificar banco: {e}")
         return True
 
 def backup_to_github():
     """Faz backup do banco para GitHub Gist"""
-    if not BACKUP_ENABLED:
+    if not BACKUP_ENABLED or not GITHUB_AVAILABLE:
         return False
     
     try:
         # Verificar se há dados para backup
-        if not os.path.exists(DATABASE) or is_database_empty():
-            print("⚠️ Nenhum dado para backup")
+        if not os.path.exists(DATABASE):
+            print("⚠️ Banco não existe para backup")
+            return False
+        
+        if is_database_empty():
+            print("⚠️ Banco vazio, pulando backup")
             return False
         
         # Ler banco de dados
@@ -140,9 +181,6 @@ def backup_to_github():
         
         # Criar/atualizar Gist
         g = Github(GITHUB_TOKEN)
-        user = g.get_user()
-        
-        global BACKUP_GIST_ID
         
         files = {"community_backup.json": {"content": json.dumps(backup_data, indent=2)}}
         
@@ -153,69 +191,94 @@ def backup_to_github():
                     description=f"NetOS Community Backup - {datetime.now().strftime('%d/%m/%Y %H:%M')}",
                     files=files
                 )
-                print(f"📤 Backup atualizado")
-            except:
-                # Se não encontrar, cria novo
-                create_new_gist(g, user, files)
+                print(f"📤 Backup atualizado no Gist: {BACKUP_GIST_ID}")
+            except Exception as e:
+                print(f"⚠️ Não conseguiu atualizar Gist existente, criando novo: {e}")
+                create_new_gist(g, files)
         else:
-            create_new_gist(g, user, files)
+            create_new_gist(g, files)
         
         return True
         
     except Exception as e:
-        print(f"❌ Erro no backup: {e}")
+        print(f"❌ Erro no backup para GitHub: {str(e)[:100]}")
         return False
 
-def create_new_gist(g, user, files):
+def create_new_gist(g, files):
     """Cria um novo Gist de backup"""
     global BACKUP_GIST_ID
-    new_gist = user.create_gist(
-        public=False,
-        files=files,
-        description=f"NetOS Community Backup - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-    )
-    BACKUP_GIST_ID = new_gist.id
-    print(f"📤 Novo backup criado: {BACKUP_GIST_ID}")
+    try:
+        user = g.get_user()
+        new_gist = user.create_gist(
+            public=False,
+            files=files,
+            description=f"NetOS Community Backup - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        )
+        BACKUP_GIST_ID = new_gist.id
+        print(f"📤 Novo backup criado: {BACKUP_GIST_ID}")
+    except Exception as e:
+        print(f"❌ Erro ao criar novo Gist: {e}")
 
 def restore_from_github():
     """Restaura banco do backup do GitHub"""
-    if not BACKUP_ENABLED:
+    if not BACKUP_ENABLED or not GITHUB_AVAILABLE:
         return False
     
     try:
         g = Github(GITHUB_TOKEN)
+        user = g.get_user()
         
         # Procurar Gist de backup
-        if not BACKUP_GIST_ID:
-            user = g.get_user()
+        target_gist = None
+        gist_id_to_use = BACKUP_GIST_ID
+        
+        # Se não tem ID salvo, procurar
+        if not gist_id_to_use:
             for gist in user.get_gists():
                 if gist.description and "NetOS Community Backup" in gist.description:
-                    BACKUP_GIST_ID = gist.id
+                    target_gist = gist
+                    gist_id_to_use = gist.id
                     break
         
-        if not BACKUP_GIST_ID:
-            print("⚠️ Nenhum backup encontrado")
+        # Se tem ID, tentar carregar
+        elif gist_id_to_use:
+            try:
+                target_gist = g.get_gist(gist_id_to_use)
+            except:
+                target_gist = None
+        
+        if not target_gist:
+            print("⚠️ Nenhum backup encontrado no GitHub")
             return False
         
         # Baixar backup
-        gist = g.get_gist(BACKUP_GIST_ID)
+        for filename, file_info in target_gist.files.items():
+            if "backup" in filename.lower() and filename.endswith('.json'):
+                try:
+                    file_content = file_info.content
+                    backup_data = json.loads(file_content)
+                    
+                    if "database" in backup_data:
+                        db_bytes = base64.b64decode(backup_data["database"])
+                        
+                        # Salvar banco
+                        with open(DATABASE, 'wb') as f:
+                            f.write(db_bytes)
+                        
+                        # Atualizar ID do Gist
+                        global BACKUP_GIST_ID
+                        BACKUP_GIST_ID = target_gist.id
+                        
+                        print(f"✅ Banco restaurado (backup de {backup_data.get('timestamp', 'data desconhecida')})")
+                        return True
+                except Exception as e:
+                    print(f"❌ Erro ao processar arquivo de backup: {e}")
         
-        for filename, file_info in gist.files.items():
-            if "backup" in filename.lower():
-                backup_data = json.loads(file_info.content)
-                db_bytes = base64.b64decode(backup_data["database"])
-                
-                # Salvar banco
-                with open(DATABASE, 'wb') as f:
-                    f.write(db_bytes)
-                
-                print(f"✅ Banco restaurado (backup de {backup_data['timestamp']})")
-                return True
-        
+        print("⚠️ Arquivo de backup não encontrado no Gist")
         return False
         
     except Exception as e:
-        print(f"❌ Erro na restauração: {e}")
+        print(f"❌ Erro na restauração do GitHub: {str(e)[:100]}")
         return False
 
 def get_table_counts():
@@ -238,16 +301,16 @@ def get_table_counts():
                 counts[table_name] = 0
         
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        print(f"⚠️ Erro ao obter contagens: {e}")
     
     return counts
 
 def auto_backup_worker():
     """Faz backup automático periodicamente"""
     while BACKUP_ENABLED:
-        time.sleep(12)  # 12s
-        print("⏰ Backup automático...")
+        time.sleep(3600)  # 1 hora = 3600 segundos
+        print("⏰ Executando backup automático...")
         backup_to_github()
 
 def trigger_backup():
@@ -255,17 +318,12 @@ def trigger_backup():
     if BACKUP_ENABLED:
         threading.Thread(target=backup_to_github).start()
 
-# ============ INICIALIZAÇÃO DO BACKUP ============
+# ============ INICIALIZAÇÃO DO SISTEMA ============
 
-init_db()
-setup_backup()
+# Inicializar tudo
+initialize_backup_system()
 
-# Tentar restaurar se o banco estiver vazio
-if os.path.exists(DATABASE) and is_database_empty():
-    print("🔄 Banco vazio, tentando restaurar do backup...")
-    restore_from_github()
-
-# ============ ROTAS EXISTENTES (inalteradas) ============
+# ============ ROTAS DA API ============
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -276,8 +334,16 @@ def health():
         'status': 'online',
         'service': 'NetOS Community Apps',
         'timestamp': datetime.now().isoformat(),
-        'backup': BACKUP_ENABLED,
-        'gist_id': BACKUP_GIST_ID
+        'backup': {
+            'enabled': BACKUP_ENABLED,
+            'gist_id': BACKUP_GIST_ID,
+            'github_available': GITHUB_AVAILABLE,
+            'token_configured': bool(GITHUB_TOKEN)
+        },
+        'database': {
+            'exists': os.path.exists(DATABASE),
+            'tables': get_table_counts()
+        }
     })
 
 @app.route('/api/backup', methods=['POST'])
