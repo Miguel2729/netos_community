@@ -180,6 +180,7 @@ def is_database_empty():
         return True
 
 def backup_to_github():
+    global BACKUP_GIST_ID
     """Faz backup do banco para GitHub Gist"""
     if not BACKUP_ENABLED or not GITHUB_AVAILABLE:
         return False
