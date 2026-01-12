@@ -30,7 +30,7 @@ ALLOWED_EXTENSIONS = {'html', 'js', 'css', 'json', 'png', 'jpg', 'jpeg'}
 # CONFIGURE AQUI SEU TOKEN DO GITHUB
 GITHUB_TOKEN = os.environ.get("TOKEN")  # Variável de ambiente no Render
 BACKUP_ENABLED = False
-BACKUP_GIST_ID = None
+BACKUP_GIST_ID = "0f0c07b79f13ad78b4fdfbffb27cd983"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
