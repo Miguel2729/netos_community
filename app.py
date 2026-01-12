@@ -75,42 +75,71 @@ def initialize_backup_system():
     """Inicializa tudo em ordem correta"""
     global BACKUP_ENABLED, BACKUP_GIST_ID
     
-    # 1. Inicializar banco de dados
-    init_db()
-    
-    # 2. Verificar se GitHub está disponível
+    # 1. Primeiro verificar se GitHub está disponível
     if not GITHUB_AVAILABLE:
         print("⚠️ PyGithub não disponível. Backup desativado.")
+        init_db()  # Pelo menos cria o banco
         return
     
-    # 3. Verificar se tem token
+    # 2. Verificar se tem token
     if not GITHUB_TOKEN:
-        print("⚠️ Token do GitHub não configurado (variável TOKEN). Backup desativado.")
+        print("⚠️ Token do GitHub não configurado. Backup desativado.")
+        init_db()  # Pelo menos cria o banco
         return
     
     try:
-        # 4. Testar conexão com GitHub
+        # 3. Conectar ao GitHub
         g = Github(GITHUB_TOKEN)
         user = g.get_user()
         print(f"✅ Conectado ao GitHub como: {user.login}")
         BACKUP_ENABLED = True
         
-        # 5. Tentar encontrar Gist existente
+        # 4. Tentar encontrar Gist existente
         for gist in user.get_gists():
             if gist.description and "NetOS Community Backup" in gist.description:
                 BACKUP_GIST_ID = gist.id
                 print(f"📁 Gist de backup encontrado: {BACKUP_GIST_ID}")
                 break
         
-        # 6. Se o banco está vazio, tentar restaurar
-        if is_database_empty():
-            print("🔄 Banco vazio, tentando restaurar do backup...")
+        # 5. VERIFICAR SE BANCO EXISTE E TEM DADOS
+        should_init_new_db = True
+        
+        if os.path.exists(DATABASE):
+            try:
+                conn = sqlite3.connect(DATABASE)
+                c = conn.cursor()
+                
+                # Verificar se tem tabelas
+                c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                has_tables = c.fetchone()[0] > 0
+                
+                if has_tables:
+                    # Verificar se tem dados
+                    c.execute("SELECT COUNT(*) FROM users")
+                    user_count = c.fetchone()[0]
+                    
+                    if user_count > 0:
+                        print("✅ Banco já existe com dados, usando local")
+                        should_init_new_db = False
+                    else:
+                        print("🔄 Banco existe mas vazio, tentando restaurar...")
+                else:
+                    print("🔄 Banco existe sem tabelas, tentando restaurar...")
+                
+                conn.close()
+            except:
+                print("🔄 Erro ao verificar banco, tentando restaurar...")
+        
+        # 6. Se precisa restaurar ou criar novo
+        if should_init_new_db:
+            print("🔄 Tentando restaurar do backup GitHub...")
             if restore_from_github():
                 print("✅ Banco restaurado do backup!")
             else:
-                print("⚠️ Nenhum backup encontrado ou falha na restauração")
+                print("⚠️ Não conseguiu restaurar, criando banco novo")
+                init_db()
         else:
-            # 7. Se tem dados, fazer backup inicial
+            # 7. Se já tem dados, fazer backup inicial
             print("🔄 Fazendo backup inicial dos dados existentes...")
             backup_to_github()
         
@@ -122,6 +151,7 @@ def initialize_backup_system():
     except Exception as e:
         print(f"❌ Erro ao inicializar backup: {str(e)[:100]}")
         BACKUP_ENABLED = False
+        init_db()  # Fallback
 
 def is_database_empty():
     """Verifica se o banco está vazio"""
