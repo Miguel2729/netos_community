@@ -130,7 +130,7 @@ def restore_database():
         
         # Procura arquivo de backup
         for filename, file_info in gist.files.items():
-            if 'backup' in filename.lower():
+            if filename == "community_backup.json":
                 try:
                     content = file_info.content
                     data = json.loads(content)
