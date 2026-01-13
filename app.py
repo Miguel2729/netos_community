@@ -112,47 +112,80 @@ def test_github():
         return False
 
 def restore_database():
-    """Tenta restaurar do backup - CHAMAR PRIMEIRO!"""
+    """Tenta restaurar do backup"""
     if not BACKUP_ENABLED:
+        print("❌ Backup desativado")
         return False
     
-    print("🔄 Tentando restaurar do GitHub...")
+    print(f"🔄 Buscando Gist ID: {BACKUP_GIST_ID}")
     
     try:
+        # 1. Conecta ao GitHub
         g = Github(GITHUB_TOKEN)
         
-        # Tenta pegar o Gist
+        # 2. Tenta pegar o Gist
         try:
             gist = g.get_gist(BACKUP_GIST_ID)
-        except:
-            print("⚠️ Gist não encontrado")
+            print(f"✅ Gist acessado: {gist.description}")
+        except Exception as e:
+            print(f"❌ Não achou Gist {BACKUP_GIST_ID}: {e}")
             return False
         
-        # Procura arquivo de backup
-        for filename, file_info in gist.files.items():
-            if filename == "community_backup.json":
-                try:
-                    content = file_info.content
-                    data = json.loads(content)
-                    
-                    if "database" in data and data["database"]:
-                        db_bytes = base64.b64decode(data["database"])
-                        
-                        with open(DATABASE, 'wb') as f:
-                            f.write(db_bytes)
-                        
-                        print(f"✅ Restaurado! {data.get('timestamp', 'N/A')}")
-                        print(f"📊 Dados: {data.get('tables', {})}")
-                        return True
-                except Exception as e:
-                    print(f"❌ Erro ao restaurar: {e}")
-                    return False
+        # 3. LISTA TODOS OS ARQUIVOS (DEBUG)
+        print("📁 Arquivos encontrados:")
+        file_found = False
+        target_filename = None
         
-        print("⚠️ Arquivo de backup não encontrado")
-        return False
+        for filename in gist.files.keys():
+            print(f"  • {filename}")
+            if filename == "community_backup.json":
+                file_found = True
+                target_filename = filename
+        
+        if not file_found:
+            print("❌ Arquivo 'community_backup.json' NÃO encontrado!")
+            print("💡 Arquivos disponíveis:", list(gist.files.keys()))
+            return False
+        
+        print(f"✅ Arquivo encontrado: {target_filename}")
+        
+        # 4. Tenta ler o arquivo
+        file_info = gist.files[target_filename]
+        
+        try:
+            data = json.loads(file_info.content)
+            print(f"✅ JSON parseado, tamanho: {len(file_info.content)} chars")
+            
+            if "database" not in data:
+                print("❌ JSON não tem campo 'database'")
+                print(f"📊 Campos disponíveis: {list(data.keys())}")
+                return False
+            
+            if not data["database"]:
+                print("❌ Campo 'database' está vazio")
+                return False
+            
+            # 5. Restaura
+            db_bytes = base64.b64decode(data["database"])
+            
+            with open(DATABASE, 'wb') as f:
+                f.write(db_bytes)
+            
+            print(f"✅ Banco restaurado! Data: {data.get('timestamp', 'N/A')}")
+            print(f"📊 Dados: {data.get('tables', {})}")
+            return True
+            
+        except json.JSONDecodeError as e:
+            print(f"❌ Erro ao parsear JSON: {e}")
+            print(f"📄 Primeiros 200 chars: {file_info.content[:200]}")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Erro na restauração: {e}")
+            return False
         
     except Exception as e:
-        print(f"❌ Restauração falhou: {e}")
+        print(f"❌ Erro geral: {e}")
         return False
 
 def create_backup():
